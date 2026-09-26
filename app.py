@@ -180,6 +180,33 @@ st.markdown(
         align-items: center;
         padding-left: 0;
         padding-right: 0;
+        border-radius: 8px;
+    }
+    .cat-header {
+        font-size: 1.05rem;
+        font-weight: 700;
+        color: #8a6d3b;
+        border-bottom: 2px solid #e4d9c3;
+        padding-bottom: 6px;
+        margin: 22px 0 14px;
+    }
+    .card-title {
+        font-weight: 700;
+        font-size: 1rem;
+        margin-bottom: 0;
+    }
+    .card-sub {
+        color: #8a837a;
+        font-size: 0.8rem;
+        margin-bottom: 6px;
+    }
+    .card-label {
+        color: #8a837a;
+        font-weight: 600;
+    }
+    .card-line {
+        font-size: 0.85rem;
+        margin: 2px 0;
     }
     </style>
     """,
@@ -206,34 +233,49 @@ with tab_browse:
     for r in rows:
         grouped.setdefault(r[2], []).append(r)
 
+    CARD_COLS = 2
     for cat, label in CATEGORY_LABELS.items():
         items = grouped.get(cat, [])
         if not items:
             continue
-        st.subheader(label)
-        for ex_id, name, category, pattern, regression, progression, equipment in items:
-            cols = st.columns([0.5, 3, 3, 3, 0.6, 0.6, 0.6])
-            checked = cols[0].checkbox("", key=f"chk_{ex_id}", value=ex_id in st.session_state.selections)
-            cols[1].markdown(f"**{name}**  \n*{pattern} · {equipment}*")
-            cols[2].markdown(f"Regression: {regression}")
-            cols[3].markdown(f"Progression: {progression}")
-            if cols[4].button("👁", key=f"view_{ex_id}", help="View exercise", use_container_width=True):
-                view_dialog(name, category, pattern, regression, progression, equipment)
-            if cols[5].button("✎", key=f"edit_{ex_id}", help="Edit exercise", use_container_width=True):
-                edit_dialog(conn, ex_id, name, category, pattern, regression, progression, equipment)
-            if cols[6].button("✕", key=f"del_{ex_id}", help="Remove exercise", use_container_width=True):
-                delete_exercise(conn, ex_id)
-                st.session_state.selections.pop(ex_id, None)
-                st.rerun()
+        st.markdown(f'<div class="cat-header">{label}</div>', unsafe_allow_html=True)
+        for i in range(0, len(items), CARD_COLS):
+            row_items = items[i : i + CARD_COLS]
+            grid = st.columns(CARD_COLS)
+            for col, item in zip(grid, row_items):
+                ex_id, name, category, pattern, regression, progression, equipment = item
+                with col:
+                    with st.container(border=True):
+                        top = st.columns([0.5, 4])
+                        checked = top[0].checkbox("", key=f"chk_{ex_id}", value=ex_id in st.session_state.selections)
+                        with top[1]:
+                            st.markdown(f'<div class="card-title">{name}</div>', unsafe_allow_html=True)
+                            st.markdown(f'<div class="card-sub">{pattern} · {equipment}</div>', unsafe_allow_html=True)
+                        st.markdown(
+                            f'<div class="card-line"><span class="card-label">Regression:</span> {regression}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown(
+                            f'<div class="card-line"><span class="card-label">Progression:</span> {progression}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        btns = st.columns(3)
+                        if btns[0].button("👁", key=f"view_{ex_id}", help="View exercise", use_container_width=True):
+                            view_dialog(name, category, pattern, regression, progression, equipment)
+                        if btns[1].button("✎", key=f"edit_{ex_id}", help="Edit exercise", use_container_width=True):
+                            edit_dialog(conn, ex_id, name, category, pattern, regression, progression, equipment)
+                        if btns[2].button("✕", key=f"del_{ex_id}", help="Remove exercise", use_container_width=True):
+                            delete_exercise(conn, ex_id)
+                            st.session_state.selections.pop(ex_id, None)
+                            st.rerun()
 
-            if checked and ex_id not in st.session_state.selections:
-                st.session_state.selections[ex_id] = {"name": name, "reps": 10}
-            elif not checked and ex_id in st.session_state.selections:
-                st.session_state.selections.pop(ex_id, None)
-        st.divider()
+                        if checked and ex_id not in st.session_state.selections:
+                            st.session_state.selections[ex_id] = {"name": name, "reps": 10}
+                        elif not checked and ex_id in st.session_state.selections:
+                            st.session_state.selections.pop(ex_id, None)
 
     # --- Selected exercises + reps ---
-    st.subheader("Selected exercises")
+    st.markdown('<div class="cat-header">Selected exercises</div>', unsafe_allow_html=True)
     if not st.session_state.selections:
         st.info("No exercises selected yet — tick items above.")
     else:
@@ -248,7 +290,7 @@ with tab_browse:
         list_text = "\n".join(
             f"{sel['name']} — {sel['reps']} reps" for sel in st.session_state.selections.values()
         )
-        st.subheader("Copy list")
+        st.markdown('<div class="cat-header">Copy list</div>', unsafe_allow_html=True)
         st.code(list_text, language=None)
 
 # --- Add exercise (open to anyone) ---
