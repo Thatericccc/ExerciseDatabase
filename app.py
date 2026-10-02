@@ -173,6 +173,8 @@ seed_if_empty(conn)
 
 if "selections" not in st.session_state:
     st.session_state.selections = {}  # id -> {"name": str, "reps": int}
+if "reset_token" not in st.session_state:
+    st.session_state.reset_token = 0  # bumped on "Clear all" to force fresh checkbox widgets
 
 st.markdown(
     """
@@ -256,9 +258,8 @@ with browse_col:
     search_term = st.text_input("🔍 Search exercises by name", placeholder="e.g. squat, press, carry")
 
     if st.button("Clear all selected", use_container_width=False):
-        for ex_id in list(st.session_state.selections.keys()):
-            st.session_state.pop(f"chk_{ex_id}", None)
         st.session_state.selections = {}
+        st.session_state.reset_token += 1
         st.rerun()
 
     rows = all_rows
@@ -291,7 +292,8 @@ with browse_col:
                         with col:
                             with st.container(border=True):
                                 top = st.columns([0.5, 4])
-                                checked = top[0].checkbox("", key=f"chk_{ex_id}", value=ex_id in st.session_state.selections)
+                                chk_key = f"chk_{st.session_state.reset_token}_{ex_id}"
+                                checked = top[0].checkbox("", key=chk_key, value=ex_id in st.session_state.selections)
                                 color = EQUIPMENT_COLORS.get(equipment, "#6b6b66")
                                 with top[1]:
                                     st.markdown(f'<div class="card-title">{name}</div>', unsafe_allow_html=True)
