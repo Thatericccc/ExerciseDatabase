@@ -255,6 +255,10 @@ browse_col, selected_col = st.columns([2, 1])
 with browse_col:
     search_term = st.text_input("🔍 Search exercises by name", placeholder="e.g. squat, press, carry")
 
+    if st.button("Clear all selected", use_container_width=False):
+        st.session_state.selections = {}
+        st.rerun()
+
     rows = all_rows
     if equipment_filter:
         rows = [r for r in rows if r[6] in equipment_filter]
