@@ -256,6 +256,8 @@ with browse_col:
     search_term = st.text_input("🔍 Search exercises by name", placeholder="e.g. squat, press, carry")
 
     if st.button("Clear all selected", use_container_width=False):
+        for ex_id in list(st.session_state.selections.keys()):
+            st.session_state.pop(f"chk_{ex_id}", None)
         st.session_state.selections = {}
         st.rerun()
 
