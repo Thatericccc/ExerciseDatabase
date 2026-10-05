@@ -23,12 +23,14 @@ CATEGORY_LABELS = {
     "lower": "Lower Body",
     "core": "Core",
     "carry": "Carry",
+    "full_body": "Full Body Compound",
 }
 CATEGORY_ICONS = {
     "upper": "💪",
     "lower": "🦵",
     "core": "🧍",
     "carry": "🎒",
+    "full_body": "🔥",
 }
 
 EQUIPMENT_OPTIONS = ["Bodyweight", "Resistance Band", "Dumbbell", "Kettlebell", "Barbell"]
@@ -50,6 +52,9 @@ DEFAULT_SEED = [
     ("Squat jump", "lower", "Triple Extension", "Box step-up with arm drive", "Broad jump / hang clean", "Bodyweight"),
     ("Plank", "core", "Core", "Dead bug", "Pallof press / hanging leg raise", "Bodyweight"),
     ("Farmer's carry", "carry", "Carry", "Suitcase carry (single side, light load)", "Overhead carry / uneven load carry", "Dumbbell"),
+    ("Dumbbell thruster", "full_body", "Squat-to-Press", "Bodyweight squat to overhead reach (no load)", "Barbell thruster", "Dumbbell"),
+    ("Kettlebell swing", "full_body", "Hinge-to-Pull", "Two-hand swing, lighter load", "Single-arm swing / snatch", "Kettlebell"),
+    ("Clean and press", "full_body", "Pull-to-Press", "Dumbbell clean and press, light load", "Barbell clean and jerk", "Barbell"),
 ]
 
 
