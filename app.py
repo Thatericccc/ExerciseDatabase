@@ -33,13 +33,15 @@ CATEGORY_ICONS = {
     "full_body": "🔥",
 }
 
-EQUIPMENT_OPTIONS = ["Bodyweight", "Resistance Band", "Dumbbell", "Kettlebell", "Barbell"]
+EQUIPMENT_OPTIONS = ["Bodyweight", "Resistance Band", "Dumbbell", "Kettlebell", "Barbell", "Machine", "Cable"]
 EQUIPMENT_COLORS = {
     "Bodyweight": "#6b6b66",
     "Resistance Band": "#2e8b57",
     "Dumbbell": "#3465a4",
     "Kettlebell": "#7b4fa0",
     "Barbell": "#b5651d",
+    "Machine": "#1f7a7a",
+    "Cable": "#a63b6b",
 }
 
 DEFAULT_SEED = [
