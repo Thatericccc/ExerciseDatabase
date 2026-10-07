@@ -84,7 +84,8 @@ DEFAULT_SEED = [
 # ---------------------------------------------------------------- storage --
 @st.cache_resource
 def get_client():
-    if not SERVICE_ACCOUNT_FILE():
+    json_string = os.getenv("GS_SERVICEACC_JSON")
+    if not json_string:
           raise ValueError("Environment variable 'GS_SERVICEACC_JSON' is missing or empty.")
 
     try:
