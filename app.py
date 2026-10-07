@@ -84,21 +84,26 @@ DEFAULT_SEED = [
 # ---------------------------------------------------------------- storage --
 @st.cache_resource
 def get_client():
-    json_string = os.getenv("GS_SERVICEACC_JSON")
-    if not json_string:
-          raise ValueError("Environment variable 'GS_SERVICEACC_JSON' is missing or empty.")
-      
-    credentials_info = json.loads (json_string)
-
+    if "GS_SERVICEACC_JSON" not in st.secrets:
+        raise ValueError("GS_SERVICEACC_JSON is missing from Streamlit Secrets.")
+        
+    json_env_string = st.secrets["GS_SERVICEACC_JSON"]
+    
+    # 2. Parse the string directly from memory
+    try:
+        credentials_info = json.loads(json_env_string)
+    except json.JSONDecodeError as e:
+        # If it fails, print a snippet to help you debug formatting
+        raise ValueError(f"JSON format is invalid. Check for missing quotes. Snippet: {json_env_string[:50]}...") from e
+    
+    # 3. Authenticate
     credentials = service_account.Credentials.from_service_account_info(credentials_info)
-
     scoped_credentials = credentials.with_scopes([
         "https://googleapis.com",
         "https://googleapis.com"
     ])
-
-    gc = gspread.authorize(scoped_credentials)
-    return gc
+    
+    return gspread.authorize(scoped_credentials)
 
 
 
