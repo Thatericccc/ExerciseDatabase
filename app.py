@@ -98,8 +98,10 @@ def get_client():
         "https://googleapis.com",
         "https://googleapis.com"
     ])
-        st.stop()
-    return gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
+
+    gc = gspread.authorize(scoped_credentials)
+    return gc
+
 
 
 @st.cache_resource
