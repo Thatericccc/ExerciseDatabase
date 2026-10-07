@@ -87,13 +87,10 @@ def get_client():
     json_string = os.getenv("GS_SERVICEACC_JSON")
     if not json_string:
           raise ValueError("Environment variable 'GS_SERVICEACC_JSON' is missing or empty.")
+      
+    credentials_info = json.loads (json_string)
 
-    try:
-      credentials_info = json.loads (json_string)
-    except json.JSONDecoderError as e:
-      raise ValueError("GS_SERVICEACC_JSON contains JSON format.") from e
-
-    credentials =  service_account.Credentials.from_service_account_info(credentials_info)
+    credentials = service_account.Credentials.from_service_account_info(credentials_info)
 
     scoped_credentials = credentials.with_scopes([
         "https://googleapis.com",
