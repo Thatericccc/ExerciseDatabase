@@ -89,7 +89,7 @@ def get_client():
           raise ValueError("Environment variable 'GS_SERVICEACC_JSON' is missing or empty.")
 
     try:
-      credentials_info = json.loads (SERVICE_ACCOUNT_FILE)
+      credentials_info = json.loads (json_string)
     except json.JSONDecoderError as e:
       raise ValueError("GS_SERVICEACC_JSON contains JSON format.") from e
 
