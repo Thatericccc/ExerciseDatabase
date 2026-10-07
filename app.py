@@ -363,14 +363,39 @@ with browse_col:
                                         f'</div>',
                                         unsafe_allow_html=True,
                                     )
-                                st.markdown(
+                                reg_key = f"{ex_id}::reg"
+                                prog_key = f"{ex_id}::prog"
+
+                                reg_row = st.columns([0.4, 4])
+                                reg_chk_key = f"chkreg_{st.session_state.reset_token}_{ex_id}"
+                                reg_checked = reg_row[0].checkbox(
+                                    "", key=reg_chk_key, value=reg_key in st.session_state.selections,
+                                )
+                                reg_row[1].markdown(
                                     f'<div class="card-line"><span class="card-label">Regression:</span> {regression}</div>',
                                     unsafe_allow_html=True,
                                 )
-                                st.markdown(
+
+                                prog_row = st.columns([0.4, 4])
+                                prog_chk_key = f"chkprog_{st.session_state.reset_token}_{ex_id}"
+                                prog_checked = prog_row[0].checkbox(
+                                    "", key=prog_chk_key, value=prog_key in st.session_state.selections,
+                                )
+                                prog_row[1].markdown(
                                     f'<div class="card-line"><span class="card-label">Progression:</span> {progression}</div>',
                                     unsafe_allow_html=True,
                                 )
+
+                                if reg_checked and reg_key not in st.session_state.selections:
+                                    st.session_state.selections[reg_key] = {"name": regression, "reps": 10}
+                                elif not reg_checked and reg_key in st.session_state.selections:
+                                    st.session_state.selections.pop(reg_key, None)
+
+                                if prog_checked and prog_key not in st.session_state.selections:
+                                    st.session_state.selections[prog_key] = {"name": progression, "reps": 10}
+                                elif not prog_checked and prog_key in st.session_state.selections:
+                                    st.session_state.selections.pop(prog_key, None)
+
                                 btns = st.columns(3)
                                 if btns[0].button("👁", key=f"view_{ex_id}", help="View exercise", use_container_width=True):
                                     view_dialog(name, category, pattern, regression, progression, equipment)
@@ -379,6 +404,8 @@ with browse_col:
                                 if btns[2].button("✕", key=f"del_{ex_id}", help="Remove exercise", use_container_width=True):
                                     delete_exercise(all_df, ex_id)
                                     st.session_state.selections.pop(ex_id, None)
+                                    st.session_state.selections.pop(reg_key, None)
+                                    st.session_state.selections.pop(prog_key, None)
                                     st.rerun()
 
                                 if checked and ex_id not in st.session_state.selections:
@@ -392,16 +419,14 @@ with selected_col:
         if not st.session_state.selections:
             st.caption("None selected yet — tick items on the left.")
         else:
-            for ex_id, sel in list(st.session_state.selections.items()):
-                st.markdown(f"**{sel['name']}**")
-                r1, r2, r3 = st.columns([1, 1, 1])
-                if r1.button("−", key=f"minus_{ex_id}", use_container_width=True):
-                    st.session_state.selections[ex_id]["reps"] = max(1, sel["reps"] - 1)
-                    st.rerun()
-                r2.markdown(f'<div class="rep-value">{sel["reps"]}</div>', unsafe_allow_html=True)
-                if r3.button("+", key=f"plus_{ex_id}", use_container_width=True):
-                    st.session_state.selections[ex_id]["reps"] = sel["reps"] + 1
-                    st.rerun()
+            for sel_key, sel in list(st.session_state.selections.items()):
+                r1, r2 = st.columns([3, 1.2])
+                r1.markdown(f"**{sel['name']}**")
+                new_reps = r2.number_input(
+                    "Reps", min_value=1, step=1, value=int(sel["reps"]),
+                    key=f"repnum_{sel_key}", label_visibility="collapsed",
+                )
+                st.session_state.selections[sel_key]["reps"] = new_reps
                 st.markdown("<hr style='margin:6px 0;'>", unsafe_allow_html=True)
 
             list_text = "\n".join(
