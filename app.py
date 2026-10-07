@@ -33,7 +33,7 @@ import streamlit as st
 
 # --- Fill in your own Google Sheet URL here ---
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1zDZgeY77XMCTqIAtStlzJwsy_AU_LJO-K4bO-QUe9Ag/edit"
-SERVICE_ACCOUNT_FILE = Path(__file__).parent / "service_account.json"
+SERVICE_ACCOUNT_FILE = os.environ.get("GS_SERVICEACC_JSON")
 WORKSHEET = "Sheet1"
 COLUMNS = ["id", "name", "category", "pattern", "regression", "progression", "equipment"]
 
