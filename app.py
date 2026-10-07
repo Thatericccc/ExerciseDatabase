@@ -1,22 +1,41 @@
 """
 Exercise Database Selector — Streamlit version
 --------------------------------------------------------
-- Exercise library stored in a local SQLite file (exercises.db), so it
-  persists across restarts and is shared by everyone using this deployment.
+- Exercise library stored in a Google Sheet, so it survives app restarts
+  and redeploys (e.g. on Streamlit Community Cloud) and is shared by
+  everyone using this deployment.
 - Anyone can browse, search, filter, tick exercises, set reps, copy the
   final list as text, and add/edit/remove exercises from the sidebar.
+
+Setup (one-time):
+    1. Create a Google Sheet. Add a header row to its first worksheet
+       (default name "Sheet1") with exactly these columns:
+       id | name | category | pattern | regression | progression | equipment
+    2. Create a Google Cloud service account with Sheets API access,
+       download its JSON key.
+    3. Save that downloaded file as service_account.json directly in this
+       same folder, right next to app.py. No .streamlit folder needed.
+    4. Share the Google Sheet with the service account's email (found as
+       "client_email" inside service_account.json) — give it Editor access.
+    5. Set SPREADSHEET_URL below to your Sheet's URL.
 
 Run locally:
     pip install -r requirements.txt
     streamlit run app.py
 """
 
-import sqlite3
+import uuid
 from pathlib import Path
 
+import gspread
+import pandas as pd
 import streamlit as st
 
-DB_PATH = Path(__file__).parent / "exercises.db"
+# --- Fill in your own Google Sheet URL here ---
+SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1zDZgeY77XMCTqIAtStlzJwsy_AU_LJO-K4bO-QUe9Ag/edit"
+SERVICE_ACCOUNT_FILE = Path(__file__).parent / "service_account.json"
+WORKSHEET = "Sheet1"
+COLUMNS = ["id", "name", "category", "pattern", "regression", "progression", "equipment"]
 
 CATEGORY_LABELS = {
     "upper": "Upper Body",
@@ -61,67 +80,102 @@ DEFAULT_SEED = [
 
 
 # ---------------------------------------------------------------- storage --
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS exercises (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            category TEXT NOT NULL,
-            pattern TEXT,
-            regression TEXT,
-            progression TEXT,
-            equipment TEXT DEFAULT 'Bodyweight'
+@st.cache_resource
+def get_client():
+    if not SERVICE_ACCOUNT_FILE.exists():
+        st.error(
+            f"Couldn't find {SERVICE_ACCOUNT_FILE.name} next to app.py. "
+            "Download your service account's JSON key from Google Cloud and "
+            "save it with that exact filename in this same folder."
         )
-        """
-    )
-    cols = [row[1] for row in conn.execute("PRAGMA table_info(exercises)").fetchall()]
-    if "equipment" not in cols:
-        conn.execute("ALTER TABLE exercises ADD COLUMN equipment TEXT DEFAULT 'Bodyweight'")
-    conn.commit()
-    return conn
+        st.stop()
+    return gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
 
 
-def seed_if_empty(conn):
-    count = conn.execute("SELECT COUNT(*) FROM exercises").fetchone()[0]
-    if count == 0:
-        conn.executemany(
-            "INSERT INTO exercises (name, category, pattern, regression, progression, equipment) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            DEFAULT_SEED,
+@st.cache_resource
+def get_worksheet():
+    gc = get_client()
+    try:
+        sh = gc.open_by_url(SPREADSHEET_URL)
+    except gspread.exceptions.APIError as e:
+        st.error(
+            "Couldn't open the Google Sheet. Make sure you've shared it with "
+            "the service account's email (found as 'client_email' in "
+            f"{SERVICE_ACCOUNT_FILE.name}) with Editor access.\n\n{e}"
         )
-        conn.commit()
+        st.stop()
+    try:
+        return sh.worksheet(WORKSHEET)
+    except gspread.exceptions.WorksheetNotFound:
+        return sh.sheet1
 
 
-def fetch_exercises(conn):
-    return conn.execute(
-        "SELECT id, name, category, pattern, regression, progression, equipment "
-        "FROM exercises ORDER BY category, name"
-    ).fetchall()
+def load_df(force=False):
+    """Read the exercise sheet as a DataFrame."""
+    ws = get_worksheet()
+    records = ws.get_all_records()
+    if not records:
+        return pd.DataFrame(columns=COLUMNS)
+    df = pd.DataFrame(records)
+    for col in COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[COLUMNS].fillna("")
+    df["id"] = df["id"].astype(str)
+    return df.reset_index(drop=True)
 
 
-def add_exercise(conn, name, category, pattern, regression, progression, equipment):
-    conn.execute(
-        "INSERT INTO exercises (name, category, pattern, regression, progression, equipment) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (name, category, pattern, regression, progression, equipment),
-    )
-    conn.commit()
+def save_df(df):
+    ws = get_worksheet()
+    ws.clear()
+    values = [COLUMNS] + df[COLUMNS].astype(str).values.tolist()
+    ws.update(values)
 
 
-def update_exercise(conn, ex_id, name, category, pattern, regression, progression, equipment):
-    conn.execute(
-        "UPDATE exercises SET name = ?, category = ?, pattern = ?, regression = ?, progression = ?, "
-        "equipment = ? WHERE id = ?",
-        (name, category, pattern, regression, progression, equipment, ex_id),
-    )
-    conn.commit()
+def seed_if_empty():
+    df = load_df(force=True)
+    if df.empty:
+        seed_rows = [
+            {
+                "id": str(uuid.uuid4()),
+                "name": name, "category": category, "pattern": pattern,
+                "regression": regression, "progression": progression, "equipment": equipment,
+            }
+            for name, category, pattern, regression, progression, equipment in DEFAULT_SEED
+        ]
+        df = pd.DataFrame(seed_rows, columns=COLUMNS)
+        save_df(df)
+    return df
 
 
-def delete_exercise(conn, ex_id):
-    conn.execute("DELETE FROM exercises WHERE id = ?", (ex_id,))
-    conn.commit()
+def fetch_exercises(df):
+    """Return rows as plain tuples, same shape the rest of the app expects."""
+    return list(df[COLUMNS].itertuples(index=False, name=None))
+
+
+def add_exercise(df, name, category, pattern, regression, progression, equipment):
+    new_row = {
+        "id": str(uuid.uuid4()), "name": name, "category": category, "pattern": pattern,
+        "regression": regression, "progression": progression, "equipment": equipment,
+    }
+    updated = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    save_df(updated)
+    return updated
+
+
+def update_exercise(df, ex_id, name, category, pattern, regression, progression, equipment):
+    idx = df.index[df["id"] == ex_id]
+    df.loc[idx, ["name", "category", "pattern", "regression", "progression", "equipment"]] = [
+        name, category, pattern, regression, progression, equipment,
+    ]
+    save_df(df)
+    return df
+
+
+def delete_exercise(df, ex_id):
+    df = df[df["id"] != ex_id].reset_index(drop=True)
+    save_df(df)
+    return df
 
 
 # --------------------------------------------------------------- dialogs --
@@ -139,7 +193,7 @@ def view_dialog(name, category, pattern, regression, progression, equipment):
 
 
 @st.dialog("Edit exercise")
-def edit_dialog(conn, ex_id, name, category, pattern, regression, progression, equipment):
+def edit_dialog(df, ex_id, name, category, pattern, regression, progression, equipment):
     new_name = st.text_input("Exercise name", value=name)
     new_category = st.selectbox(
         "Category",
@@ -162,7 +216,7 @@ def edit_dialog(conn, ex_id, name, category, pattern, regression, progression, e
             st.error("Exercise name is required.")
         else:
             update_exercise(
-                conn, ex_id, new_name.strip(), new_category,
+                df, ex_id, new_name.strip(), new_category,
                 new_pattern.strip() or "—", new_regression.strip() or "—",
                 new_progression.strip() or "—", new_equipment,
             )
@@ -175,8 +229,7 @@ def edit_dialog(conn, ex_id, name, category, pattern, regression, progression, e
 # -------------------------------------------------------------------- app --
 st.set_page_config(page_title="Exercise Database Selector", page_icon="🏋️", layout="wide")
 
-conn = get_conn()
-seed_if_empty(conn)
+all_df = seed_if_empty()
 
 if "selections" not in st.session_state:
     st.session_state.selections = {}  # id -> {"name": str, "reps": int}
@@ -240,7 +293,7 @@ with st.sidebar:
                     st.error("Exercise name is required.")
                 else:
                     add_exercise(
-                        conn, name_in.strip(), category_in,
+                        all_df, name_in.strip(), category_in,
                         pattern_in.strip() or "—", regression_in.strip() or "—",
                         progression_in.strip() or "—", equipment_in,
                     )
@@ -248,7 +301,7 @@ with st.sidebar:
                     st.rerun()
 
 # ------------------------------------------------------------- main area --
-all_rows = fetch_exercises(conn)
+all_rows = fetch_exercises(all_df)
 
 # Progress indicator
 n_selected = len(st.session_state.selections)
@@ -322,9 +375,9 @@ with browse_col:
                                 if btns[0].button("👁", key=f"view_{ex_id}", help="View exercise", use_container_width=True):
                                     view_dialog(name, category, pattern, regression, progression, equipment)
                                 if btns[1].button("✎", key=f"edit_{ex_id}", help="Edit exercise", use_container_width=True):
-                                    edit_dialog(conn, ex_id, name, category, pattern, regression, progression, equipment)
+                                    edit_dialog(all_df, ex_id, name, category, pattern, regression, progression, equipment)
                                 if btns[2].button("✕", key=f"del_{ex_id}", help="Remove exercise", use_container_width=True):
-                                    delete_exercise(conn, ex_id)
+                                    delete_exercise(all_df, ex_id)
                                     st.session_state.selections.pop(ex_id, None)
                                     st.rerun()
 
