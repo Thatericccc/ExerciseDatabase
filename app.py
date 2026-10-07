@@ -29,12 +29,13 @@ from pathlib import Path
 import os
 import json
 import gspread
+from google.oauth2 import service_account
 import pandas as pd
 import streamlit as st
 
 # --- Fill in your own Google Sheet URL here ---
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1zDZgeY77XMCTqIAtStlzJwsy_AU_LJO-K4bO-QUe9Ag/edit"
-SERVICE_ACCOUNT_FILE = os.environ.get("GS_SERVICEACC_JSON")
+SERVICE_ACCOUNT_FILE = os.getenv("GS_SERVICEACC_JSON")
 WORKSHEET = "Sheet1"
 COLUMNS = ["id", "name", "category", "pattern", "regression", "progression", "equipment"]
 
@@ -83,12 +84,20 @@ DEFAULT_SEED = [
 # ---------------------------------------------------------------- storage --
 @st.cache_resource
 def get_client():
-    if not SERVICE_ACCOUNT_FILE.exists():
-        st.error(
-            f"Couldn't find {SERVICE_ACCOUNT_FILE.name} next to app.py. "
-            "Download your service account's JSON key from Google Cloud and "
-            "save it with that exact filename in this same folder."
-        )
+    if not SERVICE_ACCOUNT_FILE():
+          raise ValueError("Environment variable 'GS_SERVICEACC_JSON' is missing or empty.")
+
+    try:
+      credentials_info = json.loads (SERVICE_ACCOUNT_FILE)
+    except json.JSONDecoderError as e:
+      raise ValueError("GS_SERVICEACC_JSON contains JSON format.") from e
+
+    credentials =  service_account.Credentials.from_service_account_info(credentials_info)
+
+    scoped_credentials = credentials.with_scopes([
+        "https://googleapis.com",
+        "https://googleapis.com"
+    ])
         st.stop()
     return gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
 
