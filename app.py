@@ -26,7 +26,7 @@ Run locally:
 
 import uuid
 from pathlib import Path
-
+import os
 import gspread
 import pandas as pd
 import streamlit as st
