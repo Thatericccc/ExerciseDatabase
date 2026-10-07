@@ -26,16 +26,14 @@ Run locally:
 
 import uuid
 from pathlib import Path
-import os
-import json
+
 import gspread
-from google.oauth2 import service_account
 import pandas as pd
 import streamlit as st
 
 # --- Fill in your own Google Sheet URL here ---
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1zDZgeY77XMCTqIAtStlzJwsy_AU_LJO-K4bO-QUe9Ag/edit"
-SERVICE_ACCOUNT_FILE = os.getenv("GS_SERVICEACC_JSON")
+SERVICE_ACCOUNT_FILE = Path(__file__).parent / "service_account.json"
 WORKSHEET = "Sheet1"
 COLUMNS = ["id", "name", "category", "pattern", "regression", "progression", "equipment"]
 
@@ -84,26 +82,14 @@ DEFAULT_SEED = [
 # ---------------------------------------------------------------- storage --
 @st.cache_resource
 def get_client():
-    if "GS_SERVICEACC_JSON" not in st.secrets:
-        raise ValueError("GS_SERVICEACC_JSON is missing from Streamlit Secrets.")
-        
-    json_env_string = st.secrets["GS_SERVICEACC_JSON"]
-    credentials_info = json.loads(json_env_string)
-    
-    # 🔥 FORCE FIX FOR NEWLINE CHARACTERS IN THE PRIVATE KEY
-    if "private_key" in credentials_info:
-        # Replaces raw character sequence '\n' with actual Python newline breaks
-        credentials_info["private_key"] = credentials_info["private_key"].replace("\\n", "\n")
-    
-    # Connect using the sanitized credentials dictionary
-    credentials = service_account.Credentials.from_service_account_info(credentials_info)
-    scoped_credentials = credentials.with_scopes([
-        "https://googleapis.com",
-        "https://googleapis.com"
-    ])
-    
-    return gspread.authorize(scoped_credentials)
-
+    if not SERVICE_ACCOUNT_FILE.exists():
+        st.error(
+            f"Couldn't find {SERVICE_ACCOUNT_FILE.name} next to app.py. "
+            "Download your service account's JSON key from Google Cloud and "
+            "save it with that exact filename in this same folder."
+        )
+        st.stop()
+    return gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
 
 
 @st.cache_resource
