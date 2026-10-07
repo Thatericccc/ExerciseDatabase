@@ -92,7 +92,7 @@ def get_client():
         # Write the secrets dictionary into a temporary JSON file at runtime
         with open(temp_json_path, "w") as f:
             json.dump(dict(st.secrets["gcp_service_account"]), f)
-        st.stop()
+          
     return gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
 
 
