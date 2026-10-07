@@ -84,14 +84,26 @@ DEFAULT_SEED = [
 # ---------------------------------------------------------------- storage --
 @st.cache_resource
 def get_client():
- # 1. Check if we are running in Streamlit Cloud and have the secret block
+ # 1. Look for the secret block from Streamlit Secrets
     if "gcp_service_account" in st.secrets:
-        # Define a temporary path inside the deployment container
-        temp_json_path = "service_account.json"
+        # Create a secure file path in the OS temporary directory
+        temp_dir = tempfile.gettempdir()
+        temp_json_path = os.path.join(temp_dir, "service_account.json")
         
-        # Write the secrets dictionary into a temporary JSON file at runtime
-        with open(temp_json_path, "w") as f:
-            json.dump(dict(st.secrets["gcp_service_account"]), f)
+        # Write the credentials file if it doesn't exist yet
+        if not os.path.exists(temp_json_path):
+            with open(temp_json_path, "w") as f:
+                json.dump(dict(st.secrets["gcp_service_account"]), f)
+        
+        # 2. Pass this absolute path to your client loader
+        return gspread.service_account(filename=temp_json_path)
+        
+    # Fallback for local development (if you have the file locally)
+    elif os.path.exists("service_account.json"):
+        return gspread.service_account(filename="service_account.json")
+        
+    else:
+        raise FileNotFoundError("Could not find gcp_service_account in secrets or service_account.json locally.")
         st.stop()
     return gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
 
