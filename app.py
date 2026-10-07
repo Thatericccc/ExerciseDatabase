@@ -84,12 +84,14 @@ DEFAULT_SEED = [
 # ---------------------------------------------------------------- storage --
 @st.cache_resource
 def get_client():
-    if not SERVICE_ACCOUNT_FILE.exists():
-        st.error(
-            f"Couldn't find {SERVICE_ACCOUNT_FILE.name} next to app.py. "
-            "Download your service account's JSON key from Google Cloud and "
-            "save it with that exact filename in this same folder."
-        )
+ # 1. Check if we are running in Streamlit Cloud and have the secret block
+    if "gcp_service_account" in st.secrets:
+        # Define a temporary path inside the deployment container
+        temp_json_path = "service_account.json"
+        
+        # Write the secrets dictionary into a temporary JSON file at runtime
+        with open(temp_json_path, "w") as f:
+            json.dump(dict(st.secrets["gcp_service_account"]), f)
         st.stop()
     return gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
 
