@@ -52,11 +52,13 @@ Images & QR codes:
     - Exercise photos are shrunk to a small JPEG and stored as text inside
       the Sheet's "image" column (Google Sheets cells hold at most 50,000
       characters, so images are compressed to fit).
-    - The Selected panel can generate a QR code. Set APP_URL below (or type
-      it into the QR box in the app) to your deployed app's public address:
-      scanning the QR then opens a read-only page listing the chosen
-      exercises with their photos and reps. Without a URL, the QR simply
-      contains the plain-text list.
+    - The Selected panel can export the chosen exercises (text + photos) as
+      a PDF, and generate a QR code for it. A QR code can't hold a whole PDF
+      (it fits only a few KB), so the QR holds a link instead: set APP_URL
+      below (or type it into the QR box in the app) to your deployed app's
+      public address. Scanning opens a read-only page listing the exercises
+      with a "Download as PDF" button. Without a URL, the QR simply contains
+      the plain-text list.
 
 Run locally:
     pip install -r requirements.txt
@@ -65,6 +67,7 @@ Run locally:
 
 import base64
 import uuid
+from datetime import date
 from io import BytesIO
 from pathlib import Path
 
@@ -72,6 +75,7 @@ import gspread
 import pandas as pd
 import qrcode
 import streamlit as st
+from fpdf import FPDF
 from PIL import Image, ImageOps
 
 # --- Fill in your own Google Sheet URL here ---
@@ -201,22 +205,14 @@ def make_qr_png(payload):
     return buf.getvalue()
 
 
-def render_plan_view(df, token):
-    """Read-only page that opens when someone scans the QR code."""
-    st.title("🏋️ Your exercise plan")
-    try:
-        items = parse_plan_token(token)
-    except Exception:
-        st.error("This link doesn't look valid. Ask for a fresh QR code.")
-        return
-    if not items:
-        st.info("This plan is empty.")
-        return
-
+def resolve_plan(df, items):
+    """Turn parsed plan items into display-ready entries (title, note, reps,
+    photo bytes). Returns (entries, number_of_missing_exercises)."""
+    entries, missing = [], 0
     for short, kind, reps in items:
         match = df[df["id"].astype(str).str.startswith(short)]
         if match.empty:
-            st.warning("One exercise in this plan is no longer available.")
+            missing += 1
             continue
         row = match.iloc[0]
         if kind == "m":
@@ -225,18 +221,117 @@ def render_plan_view(df, token):
             title, note, pic = row["regression"], f"Easier option for {row['name']}", None
         else:
             title, note, pic = row["progression"], f"Harder option for {row['name']}", None
+        entries.append({"title": title, "note": note, "reps": reps, "image": pic})
+    return entries, missing
 
+
+def _pdf_text(text):
+    """PDF's built-in fonts only cover Latin-1; swap common punctuation for
+    plain equivalents and replace anything else so nothing crashes."""
+    for old, new in {
+        "\u2014": "-", "\u2013": "-", "\u2018": "'", "\u2019": "'",
+        "\u201c": '"', "\u201d": '"', "\u2022": "-", "\u00b7": "-", "\u2026": "...",
+    }.items():
+        text = text.replace(old, new)
+    return str(text).encode("latin-1", "replace").decode("latin-1")
+
+
+def build_plan_pdf(entries, title="Exercise plan"):
+    """Build a simple PDF: one row per exercise with its photo (if any),
+    name, optional note, and reps. Returns the PDF as bytes."""
+    pdf = FPDF(format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    pdf.set_font("Helvetica", "B", 20)
+    pdf.cell(0, 11, _pdf_text(title), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(130, 130, 130)
+    pdf.cell(0, 6, date.today().strftime("%d %b %Y"), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    box_w, box_h, gap = 40, 32, 6
+    page_w = pdf.w - pdf.l_margin - pdf.r_margin
+
+    for n, e in enumerate(entries, 1):
+        img_w = img_h = 0
+        if e["image"]:
+            try:
+                w_px, h_px = Image.open(BytesIO(e["image"])).size
+                scale = min(box_w / w_px, box_h / h_px)
+                img_w, img_h = w_px * scale, h_px * scale
+            except Exception:
+                img_w = img_h = 0
+
+        row_h = max(img_h, 22)
+        if pdf.get_y() + row_h > pdf.h - pdf.b_margin:
+            pdf.add_page()
+        y = pdf.get_y()
+
+        text_x = pdf.l_margin
+        if img_w:
+            pdf.image(BytesIO(e["image"]), x=pdf.l_margin, y=y, w=img_w, h=img_h)
+            text_x = pdf.l_margin + box_w + gap
+        text_w = pdf.w - pdf.r_margin - text_x
+
+        pdf.set_xy(text_x, y)
+        pdf.set_text_color(30, 30, 30)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.multi_cell(text_w, 7, _pdf_text(f"{n}. {e['title']}"), new_x="LEFT", new_y="NEXT", align="L")
+        if e["note"]:
+            pdf.set_x(text_x)
+            pdf.set_font("Helvetica", "I", 9)
+            pdf.set_text_color(130, 130, 130)
+            pdf.multi_cell(text_w, 5, _pdf_text(e["note"]), new_x="LEFT", new_y="NEXT", align="L")
+        pdf.set_x(text_x)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(138, 109, 59)
+        pdf.cell(text_w, 7, _pdf_text(f"{e['reps']} reps"), new_x="LEFT", new_y="NEXT")
+
+        y_end = max(pdf.get_y(), y + img_h) + 4
+        pdf.set_draw_color(228, 217, 195)
+        pdf.line(pdf.l_margin, y_end, pdf.l_margin + page_w, y_end)
+        pdf.set_y(y_end + 4)
+
+    return bytes(pdf.output())
+
+
+def render_plan_view(df, token):
+    """Read-only page that opens when someone scans the QR code."""
+    st.title("🏋️ Your exercise plan")
+    try:
+        items = parse_plan_token(token)
+    except Exception:
+        st.error("This link doesn't look valid. Ask for a fresh QR code.")
+        return
+    entries, missing = resolve_plan(df, items)
+    if missing:
+        st.warning(
+            f"{missing} exercise{'s' if missing != 1 else ''} in this plan "
+            "no longer exist and were left out."
+        )
+    if not entries:
+        st.info("This plan is empty.")
+        return
+
+    st.download_button(
+        "📄 Download as PDF", data=build_plan_pdf(entries),
+        file_name="exercise-plan.pdf", mime="application/pdf",
+        type="primary", use_container_width=True,
+    )
+
+    for e in entries:
         with st.container(border=True):
-            if pic:
+            if e["image"]:
                 c_img, c_txt = st.columns([1, 2])
-                c_img.image(pic, use_container_width=True)
+                c_img.image(e["image"], use_container_width=True)
             else:
                 c_txt = st.container()
             with c_txt:
-                st.markdown(f"### {title}")
-                if note:
-                    st.caption(note)
-                st.markdown(f"**{reps} reps**")
+                st.markdown(f"### {e['title']}")
+                if e["note"]:
+                    st.caption(e["note"])
+                st.markdown(f"**{e['reps']} reps**")
 
 
 # ---------------------------------------------------------------- storage --
@@ -542,13 +637,6 @@ with st.sidebar:
 # ------------------------------------------------------------- main area --
 all_rows = fetch_exercises(all_df)
 
-# Progress indicator
-n_selected = len(st.session_state.selections)
-st.markdown(
-    f'<div class="progress-banner">✅ {n_selected} exercise{"s" if n_selected != 1 else ""} selected</div>',
-    unsafe_allow_html=True,
-)
-
 PANE_HEIGHT = 640
 
 browse_col, selected_col = st.columns([2, 1])
@@ -657,6 +745,11 @@ with browse_col:
 
 with selected_col:
     st.markdown('<div class="cat-header" style="margin-top:0;">Selected exercises</div>', unsafe_allow_html=True)
+    n_selected = len(st.session_state.selections)
+    st.markdown(
+        f'<div class="progress-banner" style="margin-top:0;">✅ {n_selected} exercise{"s" if n_selected != 1 else ""} selected</div>',
+        unsafe_allow_html=True,
+    )
     with st.container(height=PANE_HEIGHT, border=True):
         if not st.session_state.selections:
             st.caption("None selected yet — tick items on the left.")
@@ -685,24 +778,36 @@ with selected_col:
             st.markdown("**Copy list**")
             st.code(list_text, language=None)
 
+            plan_token = build_plan_token(st.session_state.selections)
+            plan_entries, _ = resolve_plan(all_df, parse_plan_token(plan_token))
+
+            st.markdown("**PDF**")
+            st.download_button(
+                "📄 Download as PDF (text + photos)",
+                data=build_plan_pdf(plan_entries),
+                file_name="exercise-plan.pdf", mime="application/pdf",
+                use_container_width=True,
+            )
+
             with st.expander("📱 QR code to scan"):
                 app_url = st.text_input(
                     "Your app's public URL",
                     value=APP_URL, key="qr_app_url",
                     placeholder="https://your-app.streamlit.app",
-                    help="Paste your deployed app's address. Scanning the QR then opens "
-                         "a page with these exercises, their photos and reps. "
-                         "Leave blank for a QR that just holds the plain-text list.",
+                    help="Paste your deployed app's address. Scanning the QR opens a page "
+                         "with these exercises, their photos and reps, plus a button to "
+                         "download the PDF. Leave blank for a QR that just holds the "
+                         "plain-text list.",
                 )
                 app_url = app_url.strip()
                 if app_url:
                     if not app_url.startswith(("http://", "https://")):
                         app_url = "https://" + app_url
-                    payload = f"{app_url.rstrip('/')}/?plan={build_plan_token(st.session_state.selections)}"
-                    qr_caption = "Scan to open this plan (with photos) on a phone."
+                    payload = f"{app_url.rstrip('/')}/?plan={plan_token}"
+                    qr_caption = "Scan to open this plan on a phone and download the PDF."
                 else:
                     payload = list_text
-                    qr_caption = "Scan to read this list as plain text (add your app URL above for photos)."
+                    qr_caption = "Scan to read this list as plain text (add your app URL above to get the PDF)."
 
                 try:
                     qr_png = make_qr_png(payload)
