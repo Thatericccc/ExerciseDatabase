@@ -13,11 +13,38 @@ Setup (one-time):
        id | name | category | pattern | regression | progression | equipment
     2. Create a Google Cloud service account with Sheets API access,
        download its JSON key.
-    3. Save that downloaded file as service_account.json directly in this
-       same folder, right next to app.py. No .streamlit folder needed.
-    4. Share the Google Sheet with the service account's email (found as
-       "client_email" inside service_account.json) — give it Editor access.
-    5. Set SPREADSHEET_URL below to your Sheet's URL.
+    3. Share the Google Sheet with the service account's email (found as
+       "client_email" inside the downloaded JSON key) — give it Editor access.
+    4. Set SPREADSHEET_URL below to your Sheet's URL.
+    5. Provide the credentials one of two ways, depending on where you run
+       this:
+
+       LOCAL development:
+           Save the downloaded JSON key file as service_account.json,
+           directly in this same folder, right next to app.py. No
+           .streamlit folder needed.
+
+       STREAMLIT COMMUNITY CLOUD:
+           Local files aren't available on Streamlit Cloud, so instead go
+           to your deployed app → Settings → Secrets, and paste in a
+           [gcp_service_account] section with the same fields as the JSON
+           key file, e.g.:
+
+               [gcp_service_account]
+               type = "service_account"
+               project_id = "your-project-id"
+               private_key_id = "..."
+               private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+               client_email = "your-service-account@your-project.iam.gserviceaccount.com"
+               client_id = "..."
+               auth_uri = "https://accounts.google.com/o/oauth2/auth"
+               token_uri = "https://oauth2.googleapis.com/token"
+               auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+               client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/your-service-account%40your-project.iam.gserviceaccount.com"
+
+           The app checks for this Streamlit secret first, and only falls
+           back to the local service_account.json file if it isn't found
+           — so the same app.py works in both places unchanged.
 
 Run locally:
     pip install -r requirements.txt
@@ -28,9 +55,6 @@ import uuid
 from pathlib import Path
 
 import gspread
-import json
-import os
-import tempfile
 import pandas as pd
 import streamlit as st
 
@@ -83,30 +107,36 @@ DEFAULT_SEED = [
 
 
 # ---------------------------------------------------------------- storage --
+def _cloud_credentials():
+    """Return the [gcp_service_account] secret as a dict, or None if it
+    isn't configured. Safe to call even when no secrets.toml exists at all
+    (e.g. pure local-file setups) — that case is not an error here."""
+    try:
+        if "gcp_service_account" in st.secrets:
+            return dict(st.secrets["gcp_service_account"])
+    except Exception:
+        pass
+    return None
+
+
 @st.cache_resource
 def get_client():
- # 1. Look for the secret block from Streamlit Secrets
-    if "gcp_service_account" in st.secrets:
-        # Create a secure file path in the OS temporary directory
-        temp_dir = tempfile.gettempdir()
-        temp_json_path = os.path.join(temp_dir, "service_account.json")
-        
-        # Write the credentials file if it doesn't exist yet
-        if not os.path.exists(temp_json_path):
-            with open(temp_json_path, "w") as f:
-                json.dump(dict(st.secrets["gcp_service_account"]), f)
-        
-        # 2. Pass this absolute path to your client loader
-        return gspread.service_account(filename=temp_json_path)
-        
-    # Fallback for local development (if you have the file locally)
-    elif os.path.exists("service_account.json"):
-        return gspread.service_account(filename="service_account.json")
-        
-    else:
-        raise FileNotFoundError("Could not find gcp_service_account in secrets or service_account.json locally.")
-        st.stop()
-    return gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
+    creds = _cloud_credentials()
+    if creds:
+        return gspread.service_account_from_dict(creds)
+
+    if SERVICE_ACCOUNT_FILE.exists():
+        return gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
+
+    st.error(
+        "No Google service account credentials found.\n\n"
+        "- **Running locally:** save your service account's JSON key as "
+        f"`{SERVICE_ACCOUNT_FILE.name}` next to app.py.\n"
+        "- **Running on Streamlit Community Cloud:** add the credentials "
+        "under your app's Settings → Secrets as a `[gcp_service_account]` "
+        "section (see the setup notes at the top of app.py)."
+    )
+    st.stop()
 
 
 @st.cache_resource
@@ -117,8 +147,9 @@ def get_worksheet():
     except gspread.exceptions.APIError as e:
         st.error(
             "Couldn't open the Google Sheet. Make sure you've shared it with "
-            "the service account's email (found as 'client_email' in "
-            f"{SERVICE_ACCOUNT_FILE.name}) with Editor access.\n\n{e}"
+            "the service account's email (the 'client_email' field in your "
+            "JSON key or [gcp_service_account] secret) with Editor access.\n\n"
+            f"{e}"
         )
         st.stop()
     try:
