@@ -10,7 +10,9 @@ Exercise Database Selector — Streamlit version
 Setup (one-time):
     1. Create a Google Sheet. Add a header row to its first worksheet
        (default name "Sheet1") with exactly these columns:
-       id | name | category | pattern | regression | progression | equipment
+       id | name | category | pattern | regression | progression | equipment | image
+       (the "image" column is new — if your Sheet predates it, the app adds
+       it automatically the next time it saves.)
     2. Create a Google Cloud service account with Sheets API access,
        download its JSON key.
     3. Share the Google Sheet with the service account's email (found as
@@ -46,23 +48,44 @@ Setup (one-time):
            back to the local service_account.json file if it isn't found
            — so the same app.py works in both places unchanged.
 
+Images & QR codes:
+    - Exercise photos are shrunk to a small JPEG and stored as text inside
+      the Sheet's "image" column (Google Sheets cells hold at most 50,000
+      characters, so images are compressed to fit).
+    - The Selected panel can generate a QR code. Set APP_URL below (or type
+      it into the QR box in the app) to your deployed app's public address:
+      scanning the QR then opens a read-only page listing the chosen
+      exercises with their photos and reps. Without a URL, the QR simply
+      contains the plain-text list.
+
 Run locally:
     pip install -r requirements.txt
     streamlit run app.py
 """
 
+import base64
 import uuid
+from io import BytesIO
 from pathlib import Path
 
 import gspread
 import pandas as pd
+import qrcode
 import streamlit as st
+from PIL import Image, ImageOps
 
 # --- Fill in your own Google Sheet URL here ---
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1zDZgeY77XMCTqIAtStlzJwsy_AU_LJO-K4bO-QUe9Ag/edit"
 SERVICE_ACCOUNT_FILE = Path(__file__).parent / "service_account.json"
 WORKSHEET = "Sheet1"
-COLUMNS = ["id", "name", "category", "pattern", "regression", "progression", "equipment"]
+COLUMNS = ["id", "name", "category", "pattern", "regression", "progression", "equipment", "image"]
+
+# Public address of your deployed app, e.g. "https://your-app.streamlit.app".
+# Used to build the QR code link. Leave blank to type it in inside the app.
+APP_URL = ""
+
+# Google Sheets cells max out at 50,000 characters; stay safely under that.
+MAX_IMAGE_CHARS = 45000
 
 CATEGORY_LABELS = {
     "upper": "Upper Body",
@@ -104,6 +127,116 @@ DEFAULT_SEED = [
     ("Kettlebell swing", "full_body", "Hinge-to-Pull", "Two-hand swing, lighter load", "Single-arm swing / snatch", "Kettlebell"),
     ("Clean and press", "full_body", "Pull-to-Press", "Dumbbell clean and press, light load", "Barbell clean and jerk", "Barbell"),
 ]
+
+
+# --------------------------------------------------------------- helpers --
+def compress_image(file_bytes):
+    """Shrink an uploaded photo into a small JPEG and return it as a base64
+    string short enough to fit in a single Google Sheets cell."""
+    img = Image.open(BytesIO(file_bytes))
+    img = ImageOps.exif_transpose(img)  # respect phone-camera rotation
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        background = Image.new("RGB", img.size, "white")
+        background.paste(img, mask=img.split()[-1])
+        img = background
+    else:
+        img = img.convert("RGB")
+
+    max_side = 420
+    while max_side >= 120:
+        work = img.copy()
+        work.thumbnail((max_side, max_side))
+        for quality in (80, 70, 60, 50, 40, 30):
+            buf = BytesIO()
+            work.save(buf, format="JPEG", quality=quality, optimize=True)
+            encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+            if len(encoded) <= MAX_IMAGE_CHARS:
+                return encoded
+        max_side = int(max_side * 0.8)
+    return ""
+
+
+def image_bytes(encoded):
+    """Decode a stored base64 image, or return None if there isn't one."""
+    if not encoded:
+        return None
+    try:
+        return base64.b64decode(encoded)
+    except Exception:
+        return None
+
+
+def build_plan_token(selections):
+    """Compact, URL-safe description of the current selection.
+    Each item is  <first 8 chars of exercise id>.<kind>.<reps>  where kind is
+    m (main exercise), r (regression) or p (progression); items joined by '-'."""
+    parts = []
+    for key, sel in selections.items():
+        ex_id, _, suffix = key.partition("::")
+        kind = {"": "m", "reg": "r", "prog": "p"}.get(suffix, "m")
+        parts.append(f"{ex_id[:8]}.{kind}.{int(sel['reps'])}")
+    return "-".join(parts)
+
+
+def parse_plan_token(token):
+    items = []
+    for part in token.split("-"):
+        short, kind, reps = part.split(".")
+        if kind not in ("m", "r", "p"):
+            raise ValueError("bad kind")
+        items.append((short, kind, int(reps)))
+    return items
+
+
+def make_qr_png(payload):
+    qr = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=2,
+    )
+    qr.add_data(payload)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def render_plan_view(df, token):
+    """Read-only page that opens when someone scans the QR code."""
+    st.title("🏋️ Your exercise plan")
+    try:
+        items = parse_plan_token(token)
+    except Exception:
+        st.error("This link doesn't look valid. Ask for a fresh QR code.")
+        return
+    if not items:
+        st.info("This plan is empty.")
+        return
+
+    for short, kind, reps in items:
+        match = df[df["id"].astype(str).str.startswith(short)]
+        if match.empty:
+            st.warning("One exercise in this plan is no longer available.")
+            continue
+        row = match.iloc[0]
+        if kind == "m":
+            title, note, pic = row["name"], "", image_bytes(row["image"])
+        elif kind == "r":
+            title, note, pic = row["regression"], f"Easier option for {row['name']}", None
+        else:
+            title, note, pic = row["progression"], f"Harder option for {row['name']}", None
+
+        with st.container(border=True):
+            if pic:
+                c_img, c_txt = st.columns([1, 2])
+                c_img.image(pic, use_container_width=True)
+            else:
+                c_txt = st.container()
+            with c_txt:
+                st.markdown(f"### {title}")
+                if note:
+                    st.caption(note)
+                st.markdown(f"**{reps} reps**")
 
 
 # ---------------------------------------------------------------- storage --
@@ -158,10 +291,20 @@ def get_worksheet():
         return sh.sheet1
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _read_records():
+    """Cached for a minute: every checkbox click re-runs the script, and
+    reading the Sheet each time would quickly hit Google's rate limit.
+    save_df() clears this cache so your own changes show up immediately."""
+    ws = get_worksheet()
+    return ws.get_all_records(numericise_ignore=["all"])
+
+
 def load_df(force=False):
     """Read the exercise sheet as a DataFrame."""
-    ws = get_worksheet()
-    records = ws.get_all_records()
+    if force:
+        _read_records.clear()
+    records = _read_records()
     if not records:
         return pd.DataFrame(columns=COLUMNS)
     df = pd.DataFrame(records)
@@ -178,16 +321,18 @@ def save_df(df):
     ws.clear()
     values = [COLUMNS] + df[COLUMNS].astype(str).values.tolist()
     ws.update(values)
+    _read_records.clear()
 
 
 def seed_if_empty():
-    df = load_df(force=True)
+    df = load_df()
     if df.empty:
         seed_rows = [
             {
                 "id": str(uuid.uuid4()),
                 "name": name, "category": category, "pattern": pattern,
                 "regression": regression, "progression": progression, "equipment": equipment,
+                "image": "",
             }
             for name, category, pattern, regression, progression, equipment in DEFAULT_SEED
         ]
@@ -201,21 +346,25 @@ def fetch_exercises(df):
     return list(df[COLUMNS].itertuples(index=False, name=None))
 
 
-def add_exercise(df, name, category, pattern, regression, progression, equipment):
+def add_exercise(df, name, category, pattern, regression, progression, equipment, image=""):
     new_row = {
         "id": str(uuid.uuid4()), "name": name, "category": category, "pattern": pattern,
         "regression": regression, "progression": progression, "equipment": equipment,
+        "image": image,
     }
     updated = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
     save_df(updated)
     return updated
 
 
-def update_exercise(df, ex_id, name, category, pattern, regression, progression, equipment):
+def update_exercise(df, ex_id, name, category, pattern, regression, progression, equipment, image=None):
+    """image=None leaves the stored photo untouched; pass a base64 string to replace it."""
     idx = df.index[df["id"] == ex_id]
     df.loc[idx, ["name", "category", "pattern", "regression", "progression", "equipment"]] = [
         name, category, pattern, regression, progression, equipment,
     ]
+    if image:
+        df.loc[idx, "image"] = image
     save_df(df)
     return df
 
@@ -228,8 +377,11 @@ def delete_exercise(df, ex_id):
 
 # --------------------------------------------------------------- dialogs --
 @st.dialog("Exercise details")
-def view_dialog(name, category, pattern, regression, progression, equipment):
+def view_dialog(name, category, pattern, regression, progression, equipment, image=""):
     st.markdown(f"### {name}")
+    pic = image_bytes(image)
+    if pic:
+        st.image(pic, use_container_width=True)
     st.markdown(f"**Category:** {CATEGORY_LABELS.get(category, category)}")
     st.markdown(f"**Movement pattern:** {pattern}")
     st.markdown(f"**Equipment:** {equipment}")
@@ -241,7 +393,7 @@ def view_dialog(name, category, pattern, regression, progression, equipment):
 
 
 @st.dialog("Edit exercise")
-def edit_dialog(df, ex_id, name, category, pattern, regression, progression, equipment):
+def edit_dialog(df, ex_id, name, category, pattern, regression, progression, equipment, image=""):
     new_name = st.text_input("Exercise name", value=name)
     new_category = st.selectbox(
         "Category",
@@ -258,18 +410,37 @@ def edit_dialog(df, ex_id, name, category, pattern, regression, progression, equ
     new_regression = st.text_input("Regression", value=regression)
     new_progression = st.text_input("Progression", value=progression)
 
+    current_pic = image_bytes(image)
+    if current_pic:
+        st.image(current_pic, caption="Current image", width=160)
+    new_image_file = st.file_uploader(
+        "Replace image (optional)" if current_pic else "Add an image (optional)",
+        type=["png", "jpg", "jpeg", "webp"], key=f"edit_img_{ex_id}",
+    )
+
     col1, col2 = st.columns(2)
     if col1.button("Save changes", use_container_width=True):
         if not new_name.strip():
             st.error("Exercise name is required.")
         else:
-            update_exercise(
-                df, ex_id, new_name.strip(), new_category,
-                new_pattern.strip() or "—", new_regression.strip() or "—",
-                new_progression.strip() or "—", new_equipment,
-            )
-            st.session_state.selections.pop(ex_id, None)
-            st.rerun()
+            new_image_b64 = None
+            image_ok = True
+            if new_image_file is not None:
+                try:
+                    new_image_b64 = compress_image(new_image_file.getvalue())
+                    if not new_image_b64:
+                        raise ValueError("image too large to compress")
+                except Exception:
+                    image_ok = False
+                    st.error("Couldn't process that image. Try a different photo (PNG or JPG).")
+            if image_ok:
+                update_exercise(
+                    df, ex_id, new_name.strip(), new_category,
+                    new_pattern.strip() or "—", new_regression.strip() or "—",
+                    new_progression.strip() or "—", new_equipment, image=new_image_b64,
+                )
+                st.session_state.selections.pop(ex_id, None)
+                st.rerun()
     if col2.button("Cancel", use_container_width=True):
         st.rerun()
 
@@ -283,6 +454,12 @@ if "selections" not in st.session_state:
     st.session_state.selections = {}  # id -> {"name": str, "reps": int}
 if "reset_token" not in st.session_state:
     st.session_state.reset_token = 0  # bumped on "Clear all" to force fresh checkbox widgets
+
+# Someone scanned a QR code: show the read-only plan page instead of the editor.
+_plan_token = st.query_params.get("plan")
+if _plan_token:
+    render_plan_view(all_df, _plan_token)
+    st.stop()
 
 st.markdown(
     """
@@ -335,18 +512,32 @@ with st.sidebar:
             equipment_in = st.selectbox("Equipment", options=EQUIPMENT_OPTIONS)
             regression_in = st.text_input("Regression (easier variation)")
             progression_in = st.text_input("Progression (harder variation)")
+            image_in = st.file_uploader(
+                "Exercise image (optional)", type=["png", "jpg", "jpeg", "webp"],
+            )
             submitted = st.form_submit_button("Add to list", use_container_width=True)
             if submitted:
                 if not name_in.strip():
                     st.error("Exercise name is required.")
                 else:
-                    add_exercise(
-                        all_df, name_in.strip(), category_in,
-                        pattern_in.strip() or "—", regression_in.strip() or "—",
-                        progression_in.strip() or "—", equipment_in,
-                    )
-                    st.success(f"Added '{name_in}'.")
-                    st.rerun()
+                    image_b64 = ""
+                    image_ok = True
+                    if image_in is not None:
+                        try:
+                            image_b64 = compress_image(image_in.getvalue())
+                            if not image_b64:
+                                raise ValueError("image too large to compress")
+                        except Exception:
+                            image_ok = False
+                            st.error("Couldn't process that image. Try a different photo (PNG or JPG).")
+                    if image_ok:
+                        add_exercise(
+                            all_df, name_in.strip(), category_in,
+                            pattern_in.strip() or "—", regression_in.strip() or "—",
+                            progression_in.strip() or "—", equipment_in, image_b64,
+                        )
+                        st.success(f"Added '{name_in}'.")
+                        st.rerun()
 
 # ------------------------------------------------------------- main area --
 all_rows = fetch_exercises(all_df)
@@ -396,7 +587,7 @@ with browse_col:
                     row_items = items[i : i + CARD_COLS]
                     grid = st.columns(CARD_COLS)
                     for col, item in zip(grid, row_items):
-                        ex_id, name, category, pattern, regression, progression, equipment = item
+                        ex_id, name, category, pattern, regression, progression, equipment, image = item
                         with col:
                             with st.container(border=True):
                                 top = st.columns([0.5, 4])
@@ -404,7 +595,10 @@ with browse_col:
                                 checked = top[0].checkbox("", key=chk_key, value=ex_id in st.session_state.selections)
                                 color = EQUIPMENT_COLORS.get(equipment, "#6b6b66")
                                 with top[1]:
-                                    st.markdown(f'<div class="card-title">{name}</div>', unsafe_allow_html=True)
+                                    st.markdown(
+                                        f'<div class="card-title">{name}{" 📷" if image else ""}</div>',
+                                        unsafe_allow_html=True,
+                                    )
                                     st.markdown(
                                         f'<div class="card-sub">{pattern}'
                                         f'<span class="badge" style="background:{color}20;color:{color};">{equipment}</span>'
@@ -446,9 +640,9 @@ with browse_col:
 
                                 btns = st.columns(3)
                                 if btns[0].button("👁", key=f"view_{ex_id}", help="View exercise", use_container_width=True):
-                                    view_dialog(name, category, pattern, regression, progression, equipment)
+                                    view_dialog(name, category, pattern, regression, progression, equipment, image)
                                 if btns[1].button("✎", key=f"edit_{ex_id}", help="Edit exercise", use_container_width=True):
-                                    edit_dialog(all_df, ex_id, name, category, pattern, regression, progression, equipment)
+                                    edit_dialog(all_df, ex_id, name, category, pattern, regression, progression, equipment, image)
                                 if btns[2].button("✕", key=f"del_{ex_id}", help="Remove exercise", use_container_width=True):
                                     delete_exercise(all_df, ex_id)
                                     st.session_state.selections.pop(ex_id, None)
@@ -467,8 +661,16 @@ with selected_col:
         if not st.session_state.selections:
             st.caption("None selected yet — tick items on the left.")
         else:
+            # Only main exercises (not their regression/progression variants) carry a photo.
+            image_by_id = dict(zip(all_df["id"].astype(str), all_df["image"]))
+
             for sel_key, sel in list(st.session_state.selections.items()):
-                r1, r2 = st.columns([3, 1.2])
+                pic = None if "::" in sel_key else image_bytes(image_by_id.get(sel_key, ""))
+                if pic:
+                    r0, r1, r2 = st.columns([1, 2.2, 1.3])
+                    r0.image(pic, use_container_width=True)
+                else:
+                    r1, r2 = st.columns([3.2, 1.3])
                 r1.markdown(f"**{sel['name']}**")
                 new_reps = r2.number_input(
                     "Reps", min_value=1, step=1, value=int(sel["reps"]),
@@ -482,3 +684,32 @@ with selected_col:
             )
             st.markdown("**Copy list**")
             st.code(list_text, language=None)
+
+            with st.expander("📱 QR code to scan"):
+                app_url = st.text_input(
+                    "Your app's public URL",
+                    value=APP_URL, key="qr_app_url",
+                    placeholder="https://your-app.streamlit.app",
+                    help="Paste your deployed app's address. Scanning the QR then opens "
+                         "a page with these exercises, their photos and reps. "
+                         "Leave blank for a QR that just holds the plain-text list.",
+                )
+                app_url = app_url.strip()
+                if app_url:
+                    if not app_url.startswith(("http://", "https://")):
+                        app_url = "https://" + app_url
+                    payload = f"{app_url.rstrip('/')}/?plan={build_plan_token(st.session_state.selections)}"
+                    qr_caption = "Scan to open this plan (with photos) on a phone."
+                else:
+                    payload = list_text
+                    qr_caption = "Scan to read this list as plain text (add your app URL above for photos)."
+
+                try:
+                    qr_png = make_qr_png(payload)
+                    st.image(qr_png, width=240, caption=qr_caption)
+                    st.download_button(
+                        "Download QR code", data=qr_png,
+                        file_name="exercise-plan-qr.png", mime="image/png",
+                    )
+                except Exception:
+                    st.warning("This list is too long to fit in a QR code. Try selecting fewer exercises.")
