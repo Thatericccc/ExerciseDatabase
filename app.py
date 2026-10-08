@@ -778,43 +778,4 @@ with selected_col:
             st.markdown("**Copy list**")
             st.code(list_text, language=None)
 
-            plan_token = build_plan_token(st.session_state.selections)
-            plan_entries, _ = resolve_plan(all_df, parse_plan_token(plan_token))
-
-            st.markdown("**PDF**")
-            st.download_button(
-                "📄 Download as PDF (text + photos)",
-                data=build_plan_pdf(plan_entries),
-                file_name="exercise-plan.pdf", mime="application/pdf",
-                use_container_width=True,
-            )
-
-            with st.expander("📱 QR code to scan"):
-                app_url = st.text_input(
-                    "Your app's public URL",
-                    value=APP_URL, key="qr_app_url",
-                    placeholder="https://your-app.streamlit.app",
-                    help="Paste your deployed app's address. Scanning the QR opens a page "
-                         "with these exercises, their photos and reps, plus a button to "
-                         "download the PDF. Leave blank for a QR that just holds the "
-                         "plain-text list.",
-                )
-                app_url = app_url.strip()
-                if app_url:
-                    if not app_url.startswith(("http://", "https://")):
-                        app_url = "https://" + app_url
-                    payload = f"{app_url.rstrip('/')}/?plan={plan_token}"
-                    qr_caption = "Scan to open this plan on a phone and download the PDF."
-                else:
-                    payload = list_text
-                    qr_caption = "Scan to read this list as plain text (add your app URL above to get the PDF)."
-
-                try:
-                    qr_png = make_qr_png(payload)
-                    st.image(qr_png, width=240, caption=qr_caption)
-                    st.download_button(
-                        "Download QR code", data=qr_png,
-                        file_name="exercise-plan-qr.png", mime="image/png",
-                    )
-                except Exception:
-                    st.warning("This list is too long to fit in a QR code. Try selecting fewer exercises.")
+            
