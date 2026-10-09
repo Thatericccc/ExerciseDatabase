@@ -48,17 +48,18 @@ Setup (one-time):
            back to the local service_account.json file if it isn't found
            — so the same app.py works in both places unchanged.
 
-Images & QR codes:
+Images:
     - Exercise photos are shrunk to a small JPEG and stored as text inside
       the Sheet's "image" column (Google Sheets cells hold at most 50,000
       characters, so images are compressed to fit).
-    - The Selected panel can export the chosen exercises (text + photos) as
-      a PDF, and generate a QR code for it. A QR code can't hold a whole PDF
-      (it fits only a few KB), so the QR holds a link instead: set APP_URL
-      below (or type it into the QR box in the app) to your deployed app's
-      public address. Scanning opens a read-only page listing the exercises
-      with a "Download as PDF" button. Without a URL, the QR simply contains
-      the plain-text list.
+
+Shareable PDF links:
+    - "Create PDF link & QR code" (Selected panel) logs the current selection
+      as a row in a worksheet called "Plans" (created automatically) with a
+      link and an expiry time. The QR code encodes that link.
+    - Opening the link shows a page with one big "Download PDF" button; the
+      PDF (names, reps and photos) is built when the page opens.
+    - Expired rows are deleted from "Plans" whenever a new link is created.
 
 Run locally:
     pip install -r requirements.txt
@@ -66,8 +67,9 @@ Run locally:
 """
 
 import base64
+import secrets
 import uuid
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 
@@ -84,12 +86,17 @@ SERVICE_ACCOUNT_FILE = Path(__file__).parent / "service_account.json"
 WORKSHEET = "Sheet1"
 COLUMNS = ["id", "name", "category", "pattern", "regression", "progression", "equipment", "image"]
 
-# Public address of your deployed app, e.g. "https://your-app.streamlit.app".
-# Used to build the QR code link. Leave blank to type it in inside the app.
-APP_URL = ""
-
 # Google Sheets cells max out at 50,000 characters; stay safely under that.
 MAX_IMAGE_CHARS = 45000
+
+# Shared PDF links: each one is a row in this worksheet (created automatically).
+PLANS_WORKSHEET = "Plans"
+PLAN_COLUMNS = ["plan_id", "created_utc", "expires_utc", "link", "count", "token", "summary"]
+LINK_VALIDITY = {"1 hour": 1, "24 hours": 24, "7 days": 168}
+
+# Public address of your deployed app, e.g. "https://your-app.streamlit.app".
+# Leave blank to auto-detect it (you can still correct it inside the app).
+APP_URL = ""
 
 CATEGORY_LABELS = {
     "upper": "Upper Body",
@@ -296,14 +303,107 @@ def build_plan_pdf(entries, title="Exercise plan"):
     return bytes(pdf.output())
 
 
-def render_plan_view(df, token):
-    """Read-only page that opens when someone scans the QR code."""
+def normalize_base_url(url):
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url.split("?")[0].split("#")[0].rstrip("/")
+
+
+def detect_app_url():
+    """Best-effort guess of the address people use to reach this app."""
+    if APP_URL:
+        return normalize_base_url(APP_URL)
+    try:
+        url = st.context.url
+        if url:
+            return normalize_base_url(url)
+    except Exception:
+        pass
+    try:
+        headers = st.context.headers
+        host = headers.get("Host", "")
+        if host:
+            local = host.startswith(("localhost", "127.0.0.1"))
+            proto = "http" if local else headers.get("X-Forwarded-Proto", "https")
+            return f"{proto}://{host}"
+    except Exception:
+        pass
+    return ""
+
+
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+
+def create_plan_record(ws, base_url, token, summary, hours):
+    """Log a new temporary PDF link as a row in the Plans worksheet."""
+    plan_id = secrets.token_urlsafe(9)
+    created = _utc_now()
+    expires = created + timedelta(hours=hours)
+    link = f"{base_url}/?pdf={plan_id}"
+    ws.append_row([
+        plan_id, created.isoformat(timespec="seconds"), expires.isoformat(timespec="seconds"),
+        link, len(token.split("-")), token, summary,
+    ])
+    return {"plan_id": plan_id, "link": link, "expires": expires}
+
+
+def lookup_plan(ws, plan_id):
+    for row in ws.get_all_values()[1:]:
+        if row and row[0] == plan_id:
+            padded = list(row) + [""] * (len(PLAN_COLUMNS) - len(row))
+            return dict(zip(PLAN_COLUMNS, padded))
+    return None
+
+
+def plan_is_expired(plan):
+    try:
+        return datetime.fromisoformat(plan["expires_utc"]) < _utc_now()
+    except Exception:
+        return True  # unreadable expiry: treat as expired rather than live forever
+
+
+def purge_expired_plans(ws):
+    """Delete expired rows from the Plans worksheet. Returns how many were removed."""
+    rows = ws.get_all_values()
+    expired = [
+        i for i, row in enumerate(rows[1:], start=2)
+        if row and row[0] and plan_is_expired(dict(zip(PLAN_COLUMNS, list(row) + [""] * 7)))
+    ]
+    runs = []  # group neighbouring rows so each block is one API call
+    for i in expired:
+        if runs and i == runs[-1][1] + 1:
+            runs[-1][1] = i
+        else:
+            runs.append([i, i])
+    for start, end in reversed(runs):  # bottom-up so row numbers stay valid
+        ws.delete_rows(start, end)
+    return len(expired)
+
+
+def render_pdf_page(df, plan_id):
+    """Page that opens when someone scans the QR code: one tap to the PDF."""
     st.title("🏋️ Your exercise plan")
     try:
-        items = parse_plan_token(token)
+        plan = lookup_plan(get_plans_worksheet(), plan_id)
     except Exception:
-        st.error("This link doesn't look valid. Ask for a fresh QR code.")
+        st.error("Couldn't load this plan right now. Please try again in a moment.")
         return
+    if plan is None:
+        st.error("This link isn't valid. Ask for a fresh QR code.")
+        return
+    if plan_is_expired(plan):
+        st.warning("This link has expired. Ask for a fresh QR code.")
+        return
+    try:
+        items = parse_plan_token(plan["token"])
+    except Exception:
+        st.error("This plan couldn't be read. Ask for a fresh QR code.")
+        return
+
     entries, missing = resolve_plan(df, items)
     if missing:
         st.warning(
@@ -315,10 +415,15 @@ def render_plan_view(df, token):
         return
 
     st.download_button(
-        "📄 Download as PDF", data=build_plan_pdf(entries),
+        "📄 Download PDF", data=build_plan_pdf(entries),
         file_name="exercise-plan.pdf", mime="application/pdf",
         type="primary", use_container_width=True,
     )
+    try:
+        valid_until = datetime.fromisoformat(plan["expires_utc"]).strftime("%d %b %Y %H:%M UTC")
+        st.caption(f"Link valid until {valid_until}")
+    except Exception:
+        pass
 
     for e in entries:
         with st.container(border=True):
@@ -368,10 +473,10 @@ def get_client():
 
 
 @st.cache_resource
-def get_worksheet():
+def get_spreadsheet():
     gc = get_client()
     try:
-        sh = gc.open_by_url(SPREADSHEET_URL)
+        return gc.open_by_url(SPREADSHEET_URL)
     except gspread.exceptions.APIError as e:
         st.error(
             "Couldn't open the Google Sheet. Make sure you've shared it with "
@@ -380,10 +485,27 @@ def get_worksheet():
             f"{e}"
         )
         st.stop()
+
+
+@st.cache_resource
+def get_worksheet():
+    sh = get_spreadsheet()
     try:
         return sh.worksheet(WORKSHEET)
     except gspread.exceptions.WorksheetNotFound:
         return sh.sheet1
+
+
+@st.cache_resource
+def get_plans_worksheet():
+    """The worksheet that logs shared PDF links. Created on first use."""
+    sh = get_spreadsheet()
+    try:
+        return sh.worksheet(PLANS_WORKSHEET)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.add_worksheet(title=PLANS_WORKSHEET, rows=200, cols=len(PLAN_COLUMNS))
+        ws.update([PLAN_COLUMNS])
+        return ws
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -550,10 +672,10 @@ if "selections" not in st.session_state:
 if "reset_token" not in st.session_state:
     st.session_state.reset_token = 0  # bumped on "Clear all" to force fresh checkbox widgets
 
-# Someone scanned a QR code: show the read-only plan page instead of the editor.
-_plan_token = st.query_params.get("plan")
-if _plan_token:
-    render_plan_view(all_df, _plan_token)
+# Someone scanned a QR code: show the one-tap PDF page instead of the editor.
+_pdf_plan_id = st.query_params.get("pdf")
+if _pdf_plan_id:
+    render_pdf_page(all_df, _pdf_plan_id)
     st.stop()
 
 st.markdown(
@@ -778,4 +900,43 @@ with selected_col:
             st.markdown("**Copy list**")
             st.code(list_text, language=None)
 
-            
+            st.markdown("**Share as PDF**")
+            validity_label = st.selectbox(
+                "Link valid for", list(LINK_VALIDITY), index=1, key="plan_validity",
+            )
+            app_url_in = st.text_input(
+                "Your app's public URL", value=detect_app_url(), key="plan_app_url",
+                placeholder="https://your-app.streamlit.app",
+                help="Where the QR code should point. Filled in automatically when "
+                     "possible: check it's the address you'd open on a phone.",
+            )
+            if st.button("Create PDF link & QR code", use_container_width=True):
+                base_url = normalize_base_url(app_url_in)
+                if not base_url:
+                    st.warning("Enter your app's public URL first so the QR code knows where to point.")
+                else:
+                    try:
+                        plans_ws = get_plans_worksheet()
+                        try:
+                            purge_expired_plans(plans_ws)
+                        except Exception:
+                            pass  # tidying up must never stop a new link being created
+                        summary = "; ".join(
+                            f"{sel['name']} x{sel['reps']}"
+                            for sel in st.session_state.selections.values()
+                        )[:900]
+                        st.session_state.last_plan = create_plan_record(
+                            plans_ws, base_url, build_plan_token(st.session_state.selections),
+                            summary, LINK_VALIDITY[validity_label],
+                        )
+                    except Exception as err:
+                        st.error(f"Couldn't save the plan to Google Sheets: {err}")
+
+            last_plan = st.session_state.get("last_plan")
+            if last_plan:
+                st.image(make_qr_png(last_plan["link"]), width=240, caption="Scan to open the PDF")
+                st.code(last_plan["link"], language=None)
+                st.caption(
+                    f"Valid until {last_plan['expires'].strftime('%d %b %Y %H:%M UTC')}. "
+                    "Logged in the 'Plans' sheet. Create a new one if you change the selection."
+                )
